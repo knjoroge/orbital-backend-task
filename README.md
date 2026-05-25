@@ -20,7 +20,7 @@ and exposes a single endpoint that consuming teams can use for billing.
 Requires Python 3.10+.
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate         # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --reload
@@ -37,7 +37,7 @@ uv run uvicorn main:app --reload
 Then:
 
 ```bash
-curl http://localhost:8000/usage | python -m json.tool
+curl http://localhost:8000/usage | python3 -m json.tool
 ```
 
 Interactive OpenAPI docs are at `http://localhost:8000/docs`.
