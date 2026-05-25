@@ -11,11 +11,11 @@ risk-management technology for real estate lawyers and conveyancers.
 legal documents (leases, titles), and can also request generated reports
 like a *Short Lease Report* or *Tenant Obligations Report*.
 
-Copilot is billed on a credits-consumed basis. This service combines
-the raw message data and report-pricing data from two upstream APIs and
-exposes a single endpoint that consuming teams can use for billing.
+Copilot is billed on credits consumed. This service stitches together
+the raw message data and report-pricing data from two upstream APIs,
+and exposes a single endpoint that consuming teams can use for billing.
 
-## Run
+## Running it
 
 Requires Python 3.10+.
 
@@ -32,86 +32,76 @@ Then:
 curl http://localhost:8000/usage | python -m json.tool
 ```
 
-Interactive OpenAPI docs at `http://localhost:8000/docs`.
+Interactive OpenAPI docs are at `http://localhost:8000/docs`.
 
-## Test
+If you'd rather use Docker:
+
+```bash
+docker build -t orbital-usage .
+docker run --rm -p 8000:8000 orbital-usage
+```
+
+## Testing
 
 ```bash
 pytest -v
 ```
 
 The suite runs in well under a second — no real network calls, upstream
-HTTP is mocked with `respx`.
+HTTP is mocked with `respx`. The unit tests on `calculate_text_credits`
+are the part worth reading closely: each isolates one pricing rule and
+works the expected number out step-by-step in a comment, so you can
+audit them against the brief without running the code.
 
-## Files
+## How it's put together
 
-```
-main.py          # FastAPI app: pricing rules + /usage route
-test_main.py     # Unit tests on pricing + integration tests on /usage
-requirements.txt
-README.md
-```
+The whole service lives in `main.py` — about 90 lines. The pricing
+rules are a pure function (`calculate_text_credits`) with no I/O; the
+route (`/usage`) handles the upstream calls and assembles the response.
+Splitting either of those across modules would add indirection without
+adding clarity. If a second endpoint or a second pricing scheme
+appeared, refactoring would make sense — but designing for that now
+would trade real readability for hypothetical flexibility.
 
-## Decisions worth highlighting
+The pricing function applies the rules in the order the brief lists
+them. The palindrome rule doubles the running total, and the minimum-1
+floor is applied last, after the doubling. That last call is the one
+piece of the brief I'd flag for review: "the minimum cost should still
+be 1 credit" lives inside the unique-word-bonus bullet, but I read it
+as a global guarantee rather than a rule scoped to that one bonus.
+Either reading is defensible — I went with the more conservative one.
 
-**Single file.** The whole API is about 80 lines of code. Splitting it
-across modules (separate schemas, upstream client, service layer) would
-add imports and indirection without making it clearer. If a second
-endpoint or a second pricing scheme appeared, I'd refactor — but
-premature structure trades readability now for flexibility I may never
-need.
+The route fetches messages first, then issues all the report lookups in
+parallel via `asyncio.gather`. The real upstream period repeats the
+same `report_id` across many messages — id 1124, "Short Lease Report",
+appears 5+ times in one period — so the report IDs are deduped before
+the parallel fetch. 404s are kept in the dict as `None`, which means
+messages whose report lookup falls back to text pricing still avoid
+refetching. Any other upstream failure — 5xx, timeout, network error —
+surfaces as a 502 to the caller. The brief stresses that billing
+accuracy matters, so failing loud is preferable to silently serving
+partial data.
 
-**Pure function for the credit math.** `calculate_text_credits` has no
-I/O — every spec rule is a numbered step, in the order the spec lists
-them. This matters: the palindrome rule doubles the running total, and
-the minimum-1 floor is applied last. Pure means it's trivially unit-
-testable. Each test has the arithmetic in a comment so a reviewer can
-verify expected values against the brief without running the code. One
-of those tests uses `"orbital latibro"` — a string that actually appears
-in the real upstream data (message id 1104). `"orbitallatibro"` is a
-palindrome (`latibro` is `orbital` reversed) — a nice sanity check that
-the rule fires on real data, not just contrived examples.
+A few smaller decisions worth flagging:
 
-**Minimum-1 floor applied LAST, after palindrome doubling.** The brief is
-slightly ambiguous here — the floor is mentioned inside the unique-word
-bullet, but I read "the minimum cost should still be 1 credit" as a
-global guarantee applied after all other rules including doubling. This
-is the one judgement call worth flagging in review.
+- `report_name` is **omitted** when there's no report, not set to
+  `null`. The brief specifies "this field should be omitted", so
+  building the response as a plain dict and conditionally adding the
+  key is the cleanest way to hit that.
+- Credits are rounded to 2 decimal places once at the end, after the
+  palindrome doubling, so floats like `9.350000000000001` don't reach
+  consumers. Rounding earlier would compound across rules.
+- One of the tests asserts on `"orbital latibro"` — a string that
+  actually appears in the real upstream data (message id 1104).
+  `latibro` is `orbital` reversed, so `"orbitallatibro"` is a
+  palindrome. A nice sanity check that the rule fires on real data,
+  not just contrived examples.
 
-**`report_name` is omitted, not null.** The brief says "this field should
-be omitted" — building the response as a plain dict and conditionally
-adding the key handles that cleanly in one line. (No Pydantic model
-needed for a one-endpoint API.)
+## What I'd add next
 
-**Rounding to 2 decimal places.** Credits are money-like; floats like
-`9.350000000000001` shouldn't reach consumers. I round once, at the end,
-after the palindrome doubling. Rounding earlier would compound.
-
-**404 handling on report lookups.** Per the brief, a 404 means "report
-not found, fall back to text pricing". Any other upstream failure (5xx,
-timeout, network error) surfaces as a 502 to the caller. The brief
-explicitly stresses that billing accuracy matters, so I'd rather fail
-loud than silently serve partial data.
-
-**Per-request cache on report lookups.** The real upstream data repeats
-the same `report_id` across many messages (`1124` for "Short Lease Report"
-appears 5+ times in one period). A small dict keyed by `report_id`
-collapses those duplicate fetches. 404s are cached too, as `None`, so
-fallback messages also avoid re-hitting the upstream.
-
-**Async client.** `httpx.AsyncClient` matches FastAPI's async runtime and
-makes it a one-line change to parallelize report lookups with
-`asyncio.gather` if that becomes a hotspot.
-
-## Concessions / things I'd add with more time
-
-These would be follow-up work — left out to keep the solution honest to
-the 2–3 hour budget:
-
-- **Parallel report lookups via `asyncio.gather`.** With the dict cache
-  in place this matters less than it would have, but uncached lookups
-  still run sequentially. With ~100 messages in the real period this is
-  the most obvious remaining performance win.
-- **Retries with backoff** on transient upstream failures (via `tenacity`
-  or `httpx-retries`).
-- **A `Dockerfile`** for one-command running.
+The natural next step is **retries with backoff** on transient upstream
+failures (via `tenacity` or `httpx-retries`). The current behavior is
+to surface any non-404 upstream failure as a 502, which is appropriate
+for billing — but a brief network blip shouldn't have to fail a whole
+period's worth of usage. Beyond that, **structured logging with request
+IDs** would be the obvious production-readiness gap.

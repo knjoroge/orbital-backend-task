@@ -1,5 +1,6 @@
 """Orbital Copilot Usage API — GET /usage returns per-message credit cost
 for the current billing period. Pricing rules are in calculate_text_credits."""
+import asyncio
 import re
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -64,6 +65,20 @@ def calculate_text_credits(text: str) -> float:
 
 # Route
 
+async def _fetch_report(http: httpx.AsyncClient, report_id: int) -> dict | None:
+    """Fetch one report. Returns None on 404 (spec: fall back to text pricing)."""
+    try:
+        r = await http.get(f"{BASE_URL}/reports/{report_id}")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Failed to fetch report {report_id}: {e}")
+    if r.status_code == 200:
+        return r.json()
+    if r.status_code == 404:
+        return None
+    # Anything other than 200/404 is unexpected — fail loud, billing accuracy matters.
+    raise HTTPException(502, f"Unexpected status {r.status_code} for report {report_id}")
+
+
 app = FastAPI(title="Orbital Copilot — Usage API")
 
 
@@ -80,34 +95,18 @@ async def get_usage():
             # Billing accuracy matters more than partial data — fail loud.
             raise HTTPException(502, f"Failed to fetch messages: {e}")
 
-        # Real upstream data repeats report_ids heavily (e.g. id 1124
-        # "Short Lease Report" shows up 5+ times in one period). Cache per
-        # request so we don't refetch. None = a 404 we already saw.
-        report_cache: dict[int, dict | None] = {}
+        # Fetch each unique report once, in parallel. The real period
+        # repeats report_ids — id 1124 "Short Lease Report" appears 5+
+        # times — so deduping keeps the upstream call count down. 404s
+        # stay in the dict as None so fallback paths don't refetch.
+        unique_ids = list({m["report_id"] for m in messages if m.get("report_id") is not None})
+        fetched = await asyncio.gather(*(_fetch_report(http, rid) for rid in unique_ids))
+        reports: dict[int, dict | None] = dict(zip(unique_ids, fetched))
 
         usage = []
         for msg in messages:
             entry = {"message_id": msg["id"], "timestamp": msg["timestamp"]}
-            report_id = msg.get("report_id")
-            report = None
-
-            if report_id is not None:
-                if report_id in report_cache:
-                    report = report_cache[report_id]
-                else:
-                    try:
-                        r = await http.get(f"{BASE_URL}/reports/{report_id}")
-                    except httpx.HTTPError as e:
-                        raise HTTPException(502, f"Failed to fetch report {report_id}: {e}")
-                    if r.status_code == 200:
-                        report = r.json()
-                    elif r.status_code != 404:
-                        # Anything other than 200/404 is unexpected — fail loud.
-                        raise HTTPException(
-                            502,
-                            f"Unexpected status {r.status_code} for report {report_id}",
-                        )
-                    report_cache[report_id] = report  # store None for 404s too
+            report = reports.get(msg.get("report_id"))
 
             if report is not None:
                 entry["report_name"] = report["name"]
