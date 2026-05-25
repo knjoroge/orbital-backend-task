@@ -1,20 +1,5 @@
-"""
-Orbital Copilot — Usage API
-
-Orbital Copilot is an AI assistant for real estate lawyers. Users ask it
-questions about legal documents (leases, titles) and can also request
-generated reports (e.g. "Short Lease Report", "Tenant Obligations Report").
-Copilot bills on consumption — each interaction costs a number of credits.
-
-This service exposes ONE endpoint, GET /usage, which returns the credit
-cost per message for the current billing period. For each message we
-either look up a fixed report cost upstream, or calculate a cost from
-the message text using the pricing rules in the brief.
-
-Everything lives in this one file because the task is small enough that
-splitting it across modules would obscure rather than clarify. The
-sections below are: pricing rules, then the route.
-"""
+"""Orbital Copilot Usage API — GET /usage returns per-message credit cost
+for the current billing period. Pricing rules are in calculate_text_credits."""
 import re
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -29,10 +14,7 @@ WORD_RE = re.compile(r"[A-Za-z'\-]+")
 VOWELS = set("aeiouAEIOU")
 
 
-# ---------------------------------------------------------------------------
-# Pricing rules — pure function, no I/O. Easy to test, easy to audit
-# against the spec line-by-line.
-# ---------------------------------------------------------------------------
+# Pricing rules — pure function, no I/O, so it audits cleanly against the spec.
 
 def calculate_text_credits(text: str) -> float:
     """Apply the text-based pricing rules from the brief, in order."""
@@ -80,9 +62,7 @@ def calculate_text_credits(text: str) -> float:
     return max(round(total, 2), 1.0)
 
 
-# ---------------------------------------------------------------------------
-# The API
-# ---------------------------------------------------------------------------
+# Route
 
 app = FastAPI(title="Orbital Copilot — Usage API")
 
@@ -91,11 +71,7 @@ app = FastAPI(title="Orbital Copilot — Usage API")
 async def get_usage():
     """Return credit usage for every message in the current billing period."""
 
-    # One AsyncClient per request is fine at this scale. If we needed
-    # higher throughput we'd promote it to app.state via a lifespan handler
-    # to keep keep-alive connections warm.
     async with httpx.AsyncClient(timeout=10.0) as http:
-        # 1. Fetch all messages for the current period.
         try:
             res = await http.get(f"{BASE_URL}/messages/current-period")
             res.raise_for_status()
@@ -104,42 +80,41 @@ async def get_usage():
             # Billing accuracy matters more than partial data — fail loud.
             raise HTTPException(502, f"Failed to fetch messages: {e}")
 
-        # 2. Build one usage entry per message.
+        # Real upstream data repeats report_ids heavily (e.g. id 1124
+        # "Short Lease Report" shows up 5+ times in one period). Cache per
+        # request so we don't refetch. None = a 404 we already saw.
+        report_cache: dict[int, dict | None] = {}
+
         usage = []
         for msg in messages:
-            entry = {
-                "message_id": msg["id"],
-                "timestamp": msg["timestamp"],
-            }
-
+            entry = {"message_id": msg["id"], "timestamp": msg["timestamp"]}
             report_id = msg.get("report_id")
             report = None
 
-            # If the message triggered a report (e.g. "Produce a Short Lease
-            # Report"), look up its fixed credit cost. A 404 means the
-            # report ID is unknown — per the spec, fall back to text pricing.
-            # Any other status is unexpected and surfaces as an error.
             if report_id is not None:
-                try:
-                    r = await http.get(f"{BASE_URL}/reports/{report_id}")
-                except httpx.HTTPError as e:
-                    raise HTTPException(502, f"Failed to fetch report {report_id}: {e}")
-                if r.status_code == 200:
-                    report = r.json()
-                elif r.status_code != 404:
-                    raise HTTPException(
-                        502,
-                        f"Unexpected status {r.status_code} for report {report_id}",
-                    )
+                if report_id in report_cache:
+                    report = report_cache[report_id]
+                else:
+                    try:
+                        r = await http.get(f"{BASE_URL}/reports/{report_id}")
+                    except httpx.HTTPError as e:
+                        raise HTTPException(502, f"Failed to fetch report {report_id}: {e}")
+                    if r.status_code == 200:
+                        report = r.json()
+                    elif r.status_code != 404:
+                        # Anything other than 200/404 is unexpected — fail loud.
+                        raise HTTPException(
+                            502,
+                            f"Unexpected status {r.status_code} for report {report_id}",
+                        )
+                    report_cache[report_id] = report  # store None for 404s too
 
             if report is not None:
-                # Report found — use its name and cost; ignore the message text.
                 entry["report_name"] = report["name"]
                 entry["credits_used"] = float(report["credit_cost"])
             else:
                 # No report (or 404) — price from the message text.
-                # `report_name` is OMITTED from the dict (not set to null),
-                # per the literal reading of the spec.
+                # `report_name` is OMITTED from the dict (not set to null).
                 entry["credits_used"] = calculate_text_credits(msg.get("text", ""))
 
             usage.append(entry)

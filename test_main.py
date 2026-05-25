@@ -176,3 +176,24 @@ def test_empty_period(client):
         return_value=httpx.Response(200, json={"messages": []})
     )
     assert client.get("/usage").json() == {"usage": []}
+
+
+@respx.mock
+def test_repeated_report_id_is_cached(client):
+    # Real data has the same report_id across many messages — we should
+    # only hit /reports/:id once per unique id per request.
+    respx.get(f"{BASE_URL}/messages/current-period").mock(
+        return_value=httpx.Response(200, json={"messages": [
+            {"id": 1, "timestamp": "t", "text": "x", "report_id": 1124},
+            {"id": 2, "timestamp": "t", "text": "x", "report_id": 1124},
+            {"id": 3, "timestamp": "t", "text": "x", "report_id": 1124},
+        ]})
+    )
+    report_route = respx.get(f"{BASE_URL}/reports/1124").mock(
+        return_value=httpx.Response(200, json={"name": "Short Lease Report",
+                                               "credit_cost": 75})
+    )
+    res = client.get("/usage")
+    assert res.status_code == 200
+    assert report_route.call_count == 1  # cached after first fetch
+    assert all(item["credits_used"] == 75.0 for item in res.json()["usage"])

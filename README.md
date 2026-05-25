@@ -66,7 +66,11 @@ I/O — every spec rule is a numbered step, in the order the spec lists
 them. This matters: the palindrome rule doubles the running total, and
 the minimum-1 floor is applied last. Pure means it's trivially unit-
 testable. Each test has the arithmetic in a comment so a reviewer can
-verify expected values against the brief without running the code.
+verify expected values against the brief without running the code. One
+of those tests uses `"orbital latibro"` — a string that actually appears
+in the real upstream data (message id 1104). `"orbitallatibro"` is a
+palindrome (`latibro` is `orbital` reversed) — a nice sanity check that
+the rule fires on real data, not just contrived examples.
 
 **Minimum-1 floor applied LAST, after palindrome doubling.** The brief is
 slightly ambiguous here — the floor is mentioned inside the unique-word
@@ -89,6 +93,12 @@ timeout, network error) surfaces as a 502 to the caller. The brief
 explicitly stresses that billing accuracy matters, so I'd rather fail
 loud than silently serve partial data.
 
+**Per-request cache on report lookups.** The real upstream data repeats
+the same `report_id` across many messages (`1124` for "Short Lease Report"
+appears 5+ times in one period). A small dict keyed by `report_id`
+collapses those duplicate fetches. 404s are cached too, as `None`, so
+fallback messages also avoid re-hitting the upstream.
+
 **Async client.** `httpx.AsyncClient` matches FastAPI's async runtime and
 makes it a one-line change to parallelize report lookups with
 `asyncio.gather` if that becomes a hotspot.
@@ -98,33 +108,10 @@ makes it a one-line change to parallelize report lookups with
 These would be follow-up work — left out to keep the solution honest to
 the 2–3 hour budget:
 
-- **Parallel report lookups via `asyncio.gather`.** Currently the route
-  fetches reports one at a time inside the loop. With ~100 messages in
-  the real billing period and ~30 of those being report requests, this
-  is the most obvious performance win.
-- **Per-request memoization of report lookups.** The real upstream data
-  shows the same `report_id` repeating across many messages (e.g.
-  `1124` for "Short Lease Report" appears 5+ times). A small `dict`
-  cache keyed by `report_id` would cut upstream calls significantly.
+- **Parallel report lookups via `asyncio.gather`.** With the dict cache
+  in place this matters less than it would have, but uncached lookups
+  still run sequentially. With ~100 messages in the real period this is
+  the most obvious remaining performance win.
 - **Retries with backoff** on transient upstream failures (via `tenacity`
   or `httpx-retries`).
-- **Structured logging + request IDs** for production diagnosability.
-- **Property-based tests** with Hypothesis on the credit calculator to
-  catch edge cases (Unicode letters, very long inputs, etc.) that
-  example-based tests can miss.
 - **A `Dockerfile`** for one-command running.
-
-## Things worth knowing when reviewing
-
-- The unit tests are the most important part of the suite — each one
-  isolates a single pricing rule, with the expected number worked out
-  step-by-step in the comment.
-- I deliberately included a test for `"orbital latibro"`, which appears
-  in the real upstream data (message id 1104). `"orbitallatibro"` is a
-  palindrome — `latibro` is `orbital` reversed. Nice sanity check that
-  the palindrome rule fires on real data, not just contrived examples.
-- The `test_length_penalty_over_100` test uses a deliberately non-
-  palindromic 101-char string. My first attempt used `'z' * 101`,
-  which IS a palindrome — the length-penalty rule fired but the result
-  got silently doubled. Good reminder of why isolating one rule per
-  test matters.
