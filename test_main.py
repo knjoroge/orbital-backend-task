@@ -197,3 +197,50 @@ def test_repeated_report_id_is_cached(client):
     assert res.status_code == 200
     assert report_route.call_count == 1  # cached after first fetch
     assert all(item["credits_used"] == 75.0 for item in res.json()["usage"])
+
+
+# ---------------------------------------------------------------------------
+# Error paths — billing accuracy matters, so we fail loud rather than serve
+# partial data. These tests pin that behavior.
+# ---------------------------------------------------------------------------
+
+@respx.mock
+def test_messages_upstream_500_returns_502(client):
+    respx.get(f"{BASE_URL}/messages/current-period").mock(
+        return_value=httpx.Response(500)
+    )
+    res = client.get("/usage")
+    assert res.status_code == 502
+    assert "Failed to fetch messages" in res.json()["detail"]
+
+
+@respx.mock
+def test_report_upstream_500_returns_502(client):
+    # Messages succeed, but the report lookup returns an unexpected 500.
+    # 404 has a defined fallback (text pricing); any other non-200 doesn't.
+    respx.get(f"{BASE_URL}/messages/current-period").mock(
+        return_value=httpx.Response(200, json={"messages": [
+            {"id": 1, "timestamp": "t", "text": "hi", "report_id": 555},
+        ]})
+    )
+    respx.get(f"{BASE_URL}/reports/555").mock(return_value=httpx.Response(500))
+    res = client.get("/usage")
+    assert res.status_code == 502
+    assert "Unexpected status 500" in res.json()["detail"]
+
+
+@respx.mock
+def test_report_upstream_timeout_returns_502(client):
+    # Network blip on a report lookup — fail loud rather than silently
+    # falling back to text pricing for a message that should have a report.
+    respx.get(f"{BASE_URL}/messages/current-period").mock(
+        return_value=httpx.Response(200, json={"messages": [
+            {"id": 1, "timestamp": "t", "text": "hi", "report_id": 555},
+        ]})
+    )
+    respx.get(f"{BASE_URL}/reports/555").mock(
+        side_effect=httpx.TimeoutException("timeout")
+    )
+    res = client.get("/usage")
+    assert res.status_code == 502
+    assert "Failed to fetch report 555" in res.json()["detail"]
