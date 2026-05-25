@@ -57,19 +57,19 @@ pytest -v
 
 The suite runs in well under a second — no real network calls, upstream
 HTTP is mocked with `respx`. The unit tests on `calculate_text_credits`
-are the part worth reading closely: each isolates one pricing rule and
-works the expected number out step-by-step in a comment, so you can
-audit them against the brief without running the code.
+each isolate one pricing rule and work the expected number out step-by-
+step in a comment, so you can audit them against the brief without
+running the code.
 
 ## How it's put together
 
 The whole service lives in `main.py` — about 90 lines. The pricing
 rules are a pure function (`calculate_text_credits`) with no I/O; the
 route (`/usage`) handles the upstream calls and assembles the response.
-Splitting either of those across modules would add indirection without
-adding clarity. If a second endpoint or a second pricing scheme
-appeared, refactoring would make sense — but designing for that now
-would trade real readability for hypothetical flexibility.
+I considered splitting them across modules, but at this size the extra
+indirection felt like it'd cost more than it added. If a second
+endpoint or a second pricing scheme appeared I'd refactor — I just
+didn't want to design for that up front.
 
 The pricing function applies the rules in the order the brief lists
 them. The palindrome rule doubles the running total, and the minimum-1
@@ -87,29 +87,30 @@ the parallel fetch. 404s are kept in the dict as `None`, which means
 messages whose report lookup falls back to text pricing still avoid
 refetching. Any other upstream failure — 5xx, timeout, network error —
 surfaces as a 502 to the caller. The brief stresses that billing
-accuracy matters, so failing loud is preferable to silently serving
+accuracy matters, so I chose to fail loud rather than silently serve
 partial data.
 
 A few smaller decisions worth flagging:
 
 - `report_name` is **omitted** when there's no report, not set to
-  `null`. The brief specifies "this field should be omitted", so
-  building the response as a plain dict and conditionally adding the
-  key is the cleanest way to hit that.
-- Credits are rounded to 2 decimal places once at the end, after the
+  `null` — the brief specifies "this field should be omitted".
+  Building the response as a plain dict and conditionally adding the
+  key handles that in one line.
+- Credits are rounded to 2 decimal places at the end, after the
   palindrome doubling, so floats like `9.350000000000001` don't reach
-  consumers. Rounding earlier would compound across rules.
+  consumers. Rounding per-rule instead would let the errors compound.
 - One of the tests asserts on `"orbital latibro"` — a string that
   actually appears in the real upstream data (message id 1104).
   `latibro` is `orbital` reversed, so `"orbitallatibro"` is a
-  palindrome. A nice sanity check that the rule fires on real data,
-  not just contrived examples.
+  palindrome. Felt worth including alongside the synthetic palindrome
+  tests as a check against real data.
 
 ## What I'd add next
 
-The natural next step is **retries with backoff** on transient upstream
-failures (via `tenacity` or `httpx-retries`). The current behavior is
-to surface any non-404 upstream failure as a 502, which is appropriate
-for billing — but a brief network blip shouldn't have to fail a whole
-period's worth of usage. Beyond that, **structured logging with request
-IDs** would be the obvious production-readiness gap.
+The first thing I'd add is **retries with backoff** on transient
+upstream failures (via `tenacity` or `httpx-retries`). The current
+behavior is to surface any non-404 upstream failure as a 502, which
+fits a billing service — but a brief network blip shouldn't have to
+fail a whole period's worth of usage. The other thing I'd add before
+running this in production is **structured logging with request IDs**,
+to make it easier to diagnose those upstream issues when they happen.

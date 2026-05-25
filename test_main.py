@@ -1,15 +1,15 @@
 """
-Tests for the Orbital Copilot Usage API.
+Tests for the Orbital Copilot Usage API. Three groups:
 
-Two groups:
+  1. Unit tests on calculate_text_credits — one per spec rule, with the
+     expected number worked out in the comment so the arithmetic can be
+     audited against the brief without running the code.
 
-  1. Unit tests on calculate_text_credits — one test per spec rule, with
-     the expected number worked out in the comment so a reviewer can
-     audit the arithmetic against the brief without running the code.
+  2. Integration tests on /usage with upstream HTTP mocked via respx —
+     report lookup, 404 fallback, empty period, and report-id deduping.
 
-  2. Integration tests on /usage that mock the upstream HTTP with respx.
-     These cover the report lookup, the 404 fallback, empty period, and
-     a realistic mixed case.
+  3. Error-path tests covering the fail-loud behavior on upstream 5xx
+     and timeouts.
 """
 import httpx
 import pytest
@@ -195,13 +195,12 @@ def test_repeated_report_id_is_cached(client):
     )
     res = client.get("/usage")
     assert res.status_code == 200
-    assert report_route.call_count == 1  # cached after first fetch
+    assert report_route.call_count == 1  # deduped to one fetch per unique id
     assert all(item["credits_used"] == 75.0 for item in res.json()["usage"])
 
 
 # ---------------------------------------------------------------------------
-# Error paths — billing accuracy matters, so we fail loud rather than serve
-# partial data. These tests pin that behavior.
+# Error paths — pin the fail-loud behavior on upstream 5xx and timeouts.
 # ---------------------------------------------------------------------------
 
 @respx.mock

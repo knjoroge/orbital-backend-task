@@ -15,7 +15,7 @@ WORD_RE = re.compile(r"[A-Za-z'\-]+")
 VOWELS = set("aeiouAEIOU")
 
 
-# Pricing rules — pure function, no I/O, so it audits cleanly against the spec.
+# Pricing rules — pure function, no I/O, easy to audit against the spec.
 
 def calculate_text_credits(text: str) -> float:
     """Apply the text-based pricing rules from the brief, in order."""
@@ -57,9 +57,8 @@ def calculate_text_credits(text: str) -> float:
     if cleaned and cleaned == cleaned[::-1]:
         total *= 2
 
-    # 8. Minimum 1 credit. Applied LAST so it's a global guarantee — the
-    #    unique-word bonus can drive the subtotal below 1 even after
-    #    palindrome doubling.
+    # 8. Minimum 1 credit, applied last — the unique-word bonus can
+    #    drive the subtotal below 1, even after palindrome doubling.
     return max(round(total, 2), 1.0)
 
 
@@ -75,7 +74,7 @@ async def _fetch_report(http: httpx.AsyncClient, report_id: int) -> dict | None:
         return r.json()
     if r.status_code == 404:
         return None
-    # Anything other than 200/404 is unexpected — fail loud, billing accuracy matters.
+    # Anything other than 200/404 is unexpected — fail loud rather than guess at a cost.
     raise HTTPException(502, f"Unexpected status {r.status_code} for report {report_id}")
 
 
@@ -92,7 +91,7 @@ async def get_usage():
             res.raise_for_status()
             messages = res.json().get("messages", [])
         except httpx.HTTPError as e:
-            # Billing accuracy matters more than partial data — fail loud.
+            # Surface the failure rather than serve an empty period.
             raise HTTPException(502, f"Failed to fetch messages: {e}")
 
         # Fetch each unique report once, in parallel. The real period
