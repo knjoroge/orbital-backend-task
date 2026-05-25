@@ -26,6 +26,14 @@ pip install -r requirements.txt
 uvicorn main:app --reload
 ```
 
+Or with [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv venv
+uv pip install -r requirements.txt
+uv run uvicorn main:app --reload
+```
+
 Then:
 
 ```bash
