@@ -1,5 +1,7 @@
 # Orbital Copilot — Usage API
 
+[![CI](https://github.com/knjoroge/orbital-backend-task/actions/workflows/ci.yml/badge.svg)](https://github.com/knjoroge/orbital-backend-task/actions/workflows/ci.yml)
+
 A small Python API that reports credit consumption for the current
 billing period in Orbital Copilot.
 
@@ -51,15 +53,23 @@ docker run --rm -p 8000:8000 orbital-usage
 
 ## Testing
 
+With your venv activated:
+
 ```bash
 pytest -v
 ```
 
-The suite runs in well under a second — no real network calls, upstream
-HTTP is mocked with `respx`. The unit tests on `calculate_text_credits`
-each isolate one pricing rule and work the expected number out step-by-
-step in a comment, so you can audit them against the brief without
-running the code.
+Or with `uv` (no activation needed):
+
+```bash
+uv run pytest -v
+```
+
+You should see 18 tests pass in well under a second — no real network
+calls, upstream HTTP is mocked with `respx`. The unit tests on
+`calculate_text_credits` each isolate one pricing rule and work the
+expected number out step-by-step in a comment, so you can audit them
+against the brief without running the code.
 
 ## How it's put together
 

@@ -82,7 +82,7 @@ app = FastAPI(title="Orbital Copilot — Usage API")
 
 
 @app.get("/usage")
-async def get_usage():
+async def get_usage() -> dict:
     """Return credit usage for every message in the current billing period."""
 
     async with httpx.AsyncClient(timeout=10.0) as http:
